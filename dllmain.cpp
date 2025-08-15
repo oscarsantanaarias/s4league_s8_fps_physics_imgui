@@ -8,8 +8,9 @@
 #include <intrin.h>
 #include <stdint.h>
 #include <cstring>
-#include <string> 
+#include <string>
 #include <iostream>
+#include <fstream>
 
 #pragma comment(lib, "detours.lib")
 #pragma comment(lib, "d3d9.lib")
@@ -17,18 +18,18 @@
 
 #pragma intrinsic(_ReturnAddress)
 
-
 static int max_framerate = 144;
 static int field_of_view = 90;
 static int center_field_of_view = 100;
 static int sprint_field_of_view = 110;
-static int display_mode = 0;           // 0 = Windowed, 1 = Fullscreen, 2 = Borderless
+//The below settings are not working yet
+static int display_mode = 0;          
 static int resolution_width = 1920;
 static int resolution_height = 1080;
-static int aspect_ratio = 1;           // Index for aspect ratio presets
-static int graphic_quality = 2;        // 0 = Low, 1 = Medium, 2 = High
+static int aspect_ratio = 1;         
+static int graphic_quality = 2;       
+//The Above settings are not working yet
 
-static float normal_jump_height_multiplier = 0.953f; 
 static float frametime = 16.666666f;
 static float speed_dampeners[9];
 static float set_drop_val = 0.0f;
@@ -36,18 +37,19 @@ static float set_drop_val = 0.0f;
 // ImGui-related globals
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 typedef HRESULT(__stdcall* EndScene_t)(LPDIRECT3DDEVICE9);
+typedef HRESULT(__stdcall* Reset_t)(LPDIRECT3DDEVICE9, D3DPRESENT_PARAMETERS*);
 static EndScene_t oEndScene = nullptr;
+static Reset_t oReset = nullptr;
 static HWND window = nullptr;
 static WNDPROC oWndProc = nullptr;
 static bool initialized = false;
 static bool showMenu = false;
-
+static D3DPRESENT_PARAMETERS g_d3dpp = {};
 
 static const char* displayModes[] = { "Windowed", "Fullscreen", "Borderless" };
 static const char* qualityLevels[] = { "Low", "Medium", "High" };
 static const char* resolutionPresets[] = { "800x600", "1280x720", "1600x900", "1920x1080", "2560x1440", "3440x1440", "3840x2160" };
 static const char* aspectRatios[] = { "4:3", "16:9", "16:10", "21:9" };
-
 
 struct game_context {
     uint8_t unknown[0x48];
@@ -84,6 +86,91 @@ static actor_ctx* fetch_actor_ctx() {
     static fetch_ctx_t fetch_ctx = (fetch_ctx_t)0x004ae0a0;
     return fetch_ctx();
 }
+
+
+
+
+//Fix FOV Start value
+static float g_CustomFov = 110.0f;
+
+bool IsValidPtr(void* ptr, size_t size = sizeof(void*))
+{
+    MEMORY_BASIC_INFORMATION mbi{};
+    if (!ptr) return false;
+    if (VirtualQuery(ptr, &mbi, sizeof(mbi)) == 0) return false;
+    if (mbi.State != MEM_COMMIT) return false;
+    if (!(mbi.Protect & (PAGE_READWRITE | PAGE_EXECUTE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_WRITECOPY)))
+        return false;
+    return !IsBadWritePtr(ptr, size);
+}
+
+void PatchOnlyNorRunFov()
+{
+    uint8_t** mgrPtr = reinterpret_cast<uint8_t**>(0x01644AC8);
+
+    if (!IsValidPtr(mgrPtr, sizeof(void*)))
+        return;
+
+    uint8_t* mgr = *mgrPtr;
+    if (!IsValidPtr(mgr, 0x30))
+        return;
+
+    uint8_t** camPtr = reinterpret_cast<uint8_t**>(mgr + 0x2C);
+    if (!IsValidPtr(camPtr, sizeof(void*)))
+        return;
+
+    uint8_t* cam = *camPtr;
+    if (!IsValidPtr(cam, 0x160))
+        return;
+
+    float* norFov = reinterpret_cast<float*>(cam + 0x154);
+    float* runFov = reinterpret_cast<float*>(cam + 0x158);
+
+  
+    if (IsValidPtr(norFov, sizeof(float)) && IsValidPtr(runFov, sizeof(float)))
+    {
+        float curNor = *norFov;
+        float curRun = *runFov;
+
+        
+        if ((curNor > 50.0f && curNor < 150.0f) &&
+            (curRun > 50.0f && curRun < 150.0f) &&
+            (curNor != g_CustomFov || curRun != g_CustomFov))
+        {
+            *norFov = g_CustomFov;
+            *runFov = g_CustomFov;
+        }
+    }
+}
+
+
+
+
+float normal_jump_height_multiplier = 0.953f;
+DWORD lastTime = GetTickCount();
+float smoothedFPS = 0.0f;
+
+
+void UpdateJumpMultiplierByFPS() {
+  
+    if (frametime > 0) {
+        float fps = 1000.0f / frametime;
+        smoothedFPS = (smoothedFPS * 0.9f) + (fps * 0.1f);
+
+        //This here changes the jump value of character to fix at certains frames
+        if (smoothedFPS < 90.0f) {
+            normal_jump_height_multiplier = 1.0f;
+        }
+        else {
+            normal_jump_height_multiplier = 0.953f;
+        }
+    }
+}
+
+
+
+
+
 
 
 LRESULT __stdcall WndProc(const HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
@@ -130,22 +217,35 @@ void ApplyGamerStyle() {
     colors[ImGuiCol_TabUnfocusedActive] = ImVec4(0.15f, 0.25f, 0.45f, 0.97f);
 }
 
-// Render game settings tab
 void RenderSettingsTab() {
     ImGui::Text("GAME SETTINGS");
     ImGui::Spacing();
-    int newFov = field_of_view;
-    if (ImGui::SliderInt("Field of View", &newFov, 60, 100, "%d°")) {
-        field_of_view = newFov;
-        center_field_of_view = newFov;
-        sprint_field_of_view = newFov;
+
+    if (ImGui::SliderFloat("Field of View", &g_CustomFov, 60.0f, 120.0f, "%.0f°")) {
+      
+        field_of_view = static_cast<int>(g_CustomFov);
+        center_field_of_view = static_cast<int>(g_CustomFov);
+        sprint_field_of_view = static_cast<int>(g_CustomFov);
+
+     
+        auto mgr = *reinterpret_cast<uint8_t**>(0x01644AC8);
+        if (mgr) {
+            auto cam = *reinterpret_cast<uint8_t**>(mgr + 0x2C);
+            if (cam) {
+                *reinterpret_cast<float*>(cam + 0x154) = g_CustomFov; // NORFOV
+                *reinterpret_cast<float*>(cam + 0x158) = g_CustomFov; // RUNFOV
+            }
+        }
     }
+
     ImGui::Text("Center Field of View: %d°", center_field_of_view);
     ImGui::Text("Sprint Field of View: %d°", sprint_field_of_view);
-    ImGui::SliderInt("Max Framerate", &max_framerate, 30, 360, "%d FPS");
+
+    ImGui::SliderInt("Max Framerate", &max_framerate, 30, 1000, "%d FPS");
 }
 
-// Render graphics settings tab
+
+
 void RenderGraphicSettingsTab() {
     ImGui::Text("DISPLAY SETTINGS");
     ImGui::Spacing();
@@ -171,12 +271,43 @@ void RenderGraphicSettingsTab() {
     ImGui::Combo("Quality Preset", &graphic_quality, qualityLevels, IM_ARRAYSIZE(qualityLevels));
 }
 
-// Hooked EndScene function
+HRESULT __stdcall hkReset(LPDIRECT3DDEVICE9 pDevice, D3DPRESENT_PARAMETERS* pPresentationParameters) {
+    PatchOnlyNorRunFov();
+    if (initialized) {
+        ImGui_ImplDX9_InvalidateDeviceObjects();
+    }
+    HRESULT hr = oReset(pDevice, pPresentationParameters);
+    if (SUCCEEDED(hr) && initialized) {
+        ImGui_ImplDX9_CreateDeviceObjects();
+    }
+    if (FAILED(hr)) {
+
+    }
+    return hr;
+}
+
 HRESULT __stdcall hkEndScene(LPDIRECT3DDEVICE9 pDevice) {
+    UpdateJumpMultiplierByFPS();
+    HRESULT hr = pDevice->TestCooperativeLevel();
+    if (hr == D3DERR_DEVICELOST) {
+        Sleep(50);
+        return oEndScene(pDevice);
+    }
+    else if (hr == D3DERR_DEVICENOTRESET) {
+        HRESULT resetHr = pDevice->Reset(&g_d3dpp);
+        if (FAILED(resetHr)) {
+
+            return oEndScene(pDevice);
+        }
+    }
+    
+
+
     if (!initialized) {
         window = FindWindowA("S4_Client", nullptr);
         if (!window)
             return oEndScene(pDevice);
+
         ImGui::CreateContext();
         ApplyGamerStyle();
         ImGui_ImplWin32_Init(window);
@@ -218,12 +349,13 @@ HRESULT __stdcall hkEndScene(LPDIRECT3DDEVICE9 pDevice) {
         ImGui::End();
     }
 
+
+
     ImGui::Render();
     ImGui_ImplDX9_RenderDrawData(ImGui::GetDrawData());
     return oEndScene(pDevice);
 }
 
-// Thread to hook EndScene
 DWORD WINAPI InitHook(LPVOID) {
     while (!(window = FindWindowA("S4_Client", nullptr)))
         Sleep(100);
@@ -235,6 +367,7 @@ DWORD WINAPI InitHook(LPVOID) {
     d3dpp.Windowed = TRUE;
     d3dpp.SwapEffect = D3DSWAPEFFECT_DISCARD;
     d3dpp.hDeviceWindow = window;
+    g_d3dpp = d3dpp;
 
     IDirect3DDevice9* pDevice = nullptr;
     if (FAILED(pD3D->CreateDevice(D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, window,
@@ -245,9 +378,12 @@ DWORD WINAPI InitHook(LPVOID) {
 
     void** vTable = *reinterpret_cast<void***>(pDevice);
     oEndScene = (EndScene_t)vTable[42];
+    oReset = (Reset_t)vTable[16];
+
     DetourTransactionBegin();
     DetourUpdateThread(GetCurrentThread());
     DetourAttach(&(PVOID&)oEndScene, hkEndScene);
+    DetourAttach(&(PVOID&)oReset, hkReset);
     DetourTransactionCommit();
 
     pDevice->Release();
@@ -255,7 +391,6 @@ DWORD WINAPI InitHook(LPVOID) {
     return 0;
 }
 
-// Patched functions
 void __fastcall patched_fun_005e4020(void* ecx, void* edx, uint32_t param_1) {
     ctx_fun_005e4020* ctx = (ctx_fun_005e4020*)ecx;
     orig_fun_005e4020(ctx, param_1);
@@ -265,6 +400,7 @@ void __fastcall patched_fun_005e4020(void* ecx, void* edx, uint32_t param_1) {
 }
 
 void __fastcall patched_move_actor_by(void* ecx, void* edx, float param_1, float param_2, float param_3) {
+    PatchOnlyNorRunFov();
     actor_ctx* actx = fetch_actor_ctx();
     float y = param_2;
     static float scythe_time = 0.0f;
@@ -353,6 +489,7 @@ void __fastcall patched_move_actor_by(void* ecx, void* edx, float param_1, float
 }
 
 void __fastcall patched_game_tick(void* ecx, void* edx) {
+    PatchOnlyNorRunFov();
     game_context* ctx = fetch_game_context();
     if (!ctx) return;
 
@@ -400,8 +537,8 @@ void __fastcall patched_game_tick(void* ecx, void* edx) {
     speed_dampeners[8] = new_speed_dampener;
 }
 
-// Hooking functions
 void hook_move_actor_by() {
+    PatchOnlyNorRunFov();
     uint8_t* target_addr = (uint8_t*)0x0051c2f0;
     const int patch_size = 10;
     uint8_t* trampoline = (uint8_t*)VirtualAlloc(NULL, patch_size + 5, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
@@ -424,6 +561,7 @@ void hook_move_actor_by() {
 }
 
 void hook_game_tick() {
+    PatchOnlyNorRunFov();
     uint8_t* target_addr = (uint8_t*)0x00871970;
     const int patch_size = 9;
     uint8_t* trampoline = (uint8_t*)VirtualAlloc(NULL, patch_size + 5, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
@@ -446,6 +584,7 @@ void hook_game_tick() {
 }
 
 void hook_fun_005e4020() {
+
     uint8_t* target_addr = (uint8_t*)0x005e4020;
     const int patch_size = 10;
     uint8_t* trampoline = (uint8_t*)VirtualAlloc(NULL, patch_size + 5, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
@@ -468,6 +607,7 @@ void hook_fun_005e4020() {
 }
 
 void patch_min_frametime(double min_frametime) {
+    PatchOnlyNorRunFov();
     double* min_frametime_const = (double*)0x013d33a0;
     DWORD oldProtect;
     VirtualProtect(min_frametime_const, sizeof(double), PAGE_EXECUTE_READWRITE, &oldProtect);
@@ -476,6 +616,7 @@ void patch_min_frametime(double min_frametime) {
 }
 
 void redirect_speed_dampeners() {
+    PatchOnlyNorRunFov();
     const uint8_t value[] = { 0x8f, 0xc2, 0x75, 0x3c };
     for (int i = 0; i < 9; i++) {
         memcpy(&speed_dampeners[i], value, sizeof(value));
@@ -492,16 +633,21 @@ void redirect_speed_dampeners() {
     patch_location = (uint32_t*)0x007b2363; *patch_location = (uint32_t)&speed_dampeners[8];
 }
 
-
 DWORD WINAPI main_thread(LPVOID) {
     patch_min_frametime(1.0 / max_framerate);
     redirect_speed_dampeners();
     hook_game_tick();
     hook_move_actor_by();
     hook_fun_005e4020();
+
+    while (true)
+    {
+        PatchOnlyNorRunFov(); 
+        Sleep(100);          
+    }
+
     return 0;
 }
-
 
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID) {
     if (reason == DLL_PROCESS_ATTACH) {
@@ -510,7 +656,15 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID) {
         CreateThread(nullptr, 0, InitHook, nullptr, 0, NULL);
     }
     else if (reason == DLL_PROCESS_DETACH && initialized) {
-        SetWindowLongPtr(window, GWLP_WNDPROC, (LONG_PTR)oWndProc);
+        if (oWndProc) SetWindowLongPtr(window, GWLP_WNDPROC, (LONG_PTR)oWndProc);
+        ImGui_ImplDX9_Shutdown();
+        ImGui_ImplWin32_Shutdown();
+        ImGui::DestroyContext();
+        DetourTransactionBegin();
+        DetourUpdateThread(GetCurrentThread());
+        DetourDetach(&(PVOID&)oEndScene, hkEndScene);
+        DetourDetach(&(PVOID&)oReset, hkReset);
+        DetourTransactionCommit();
     }
     return TRUE;
 }
