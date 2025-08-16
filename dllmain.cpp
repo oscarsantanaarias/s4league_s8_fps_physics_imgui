@@ -34,7 +34,7 @@ static int graphic_quality = 2;
 
 float normal_jump_height_multiplier = 0.953f;
 
-//Here you can edit the fly jump + jumping
+//Here you can edit the fly jump + white flying
 float flight_multiplier = 1.0f;   
 //HERE YOU CAN CHANGE THE EXO JUMP!
 float exo_jump_multiplier = 2.0f;
