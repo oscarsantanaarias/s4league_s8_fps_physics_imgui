@@ -1,3 +1,5 @@
+#define _CRT_SECURE_NO_WARNINGS
+
 #include <Windows.h>
 #include <d3d9.h>
 #include <d3dx9.h>
@@ -29,6 +31,13 @@ static int resolution_height = 1080;
 static int aspect_ratio = 1;         
 static int graphic_quality = 2;       
 //The Above settings are not working yet
+
+float normal_jump_height_multiplier = 0.953f;
+
+//Here you can edit the fly jump + jumping
+float flight_multiplier = 1.0f;   
+//HERE YOU CAN CHANGE THE EXO JUMP!
+float exo_jump_multiplier = 2.0f;
 
 static float frametime = 16.666666f;
 static float speed_dampeners[9];
@@ -146,7 +155,7 @@ void PatchOnlyNorRunFov()
 
 
 
-float normal_jump_height_multiplier = 0.953f;
+
 DWORD lastTime = GetTickCount();
 float smoothedFPS = 0.0f;
 
@@ -221,11 +230,11 @@ void RenderSettingsTab() {
     ImGui::Text("GAME SETTINGS");
     ImGui::Spacing();
 
-    if (ImGui::SliderFloat("Field of View", &g_CustomFov, 60.0f, 120.0f, "%.0f°")) {
+    if (ImGui::SliderFloat("Field of View", &g_CustomFov, 50.0f, 120.0f, "%.0f°")) {
       
         field_of_view = static_cast<int>(g_CustomFov);
         center_field_of_view = static_cast<int>(g_CustomFov);
-        sprint_field_of_view = static_cast<int>(g_CustomFov);
+        sprint_field_of_view = static_cast<int>(g_CustomFov) + 10;
 
      
         auto mgr = *reinterpret_cast<uint8_t**>(0x01644AC8);
@@ -242,6 +251,8 @@ void RenderSettingsTab() {
     ImGui::Text("Sprint Field of View: %d°", sprint_field_of_view);
 
     ImGui::SliderInt("Max Framerate", &max_framerate, 30, 1000, "%d FPS");
+    //Here you can enable a slider to edit the exo jump
+    //  ImGui::SliderFloat("EXO Jump Multiplier", &exo_jump_multiplier, 0.1f, 5.0f);
 }
 
 
@@ -286,8 +297,10 @@ HRESULT __stdcall hkReset(LPDIRECT3DDEVICE9 pDevice, D3DPRESENT_PARAMETERS* pPre
     return hr;
 }
 
+
 HRESULT __stdcall hkEndScene(LPDIRECT3DDEVICE9 pDevice) {
     UpdateJumpMultiplierByFPS();
+
     HRESULT hr = pDevice->TestCooperativeLevel();
     if (hr == D3DERR_DEVICELOST) {
         Sleep(50);
@@ -296,12 +309,9 @@ HRESULT __stdcall hkEndScene(LPDIRECT3DDEVICE9 pDevice) {
     else if (hr == D3DERR_DEVICENOTRESET) {
         HRESULT resetHr = pDevice->Reset(&g_d3dpp);
         if (FAILED(resetHr)) {
-
             return oEndScene(pDevice);
         }
     }
-    
-
 
     if (!initialized) {
         window = FindWindowA("S4_Client", nullptr);
@@ -327,7 +337,18 @@ HRESULT __stdcall hkEndScene(LPDIRECT3DDEVICE9 pDevice) {
     ImGui::NewFrame();
 
     if (showMenu) {
-        ImGui::SetNextWindowSize(ImVec2(600, 350), ImGuiCond_Once);
+       
+        ImVec2 displaySize = ImGui::GetIO().DisplaySize;
+        ImVec2 windowSize = ImVec2(600, 350);
+        ImVec2 windowPos = ImVec2(
+            (displaySize.x - windowSize.x) * 0.5f,
+            (displaySize.y - windowSize.y) * 0.5f
+        );
+
+        ImGui::SetNextWindowPos(windowPos, ImGuiCond_Always);
+        ImGui::SetNextWindowSize(windowSize, ImGuiCond_Always);
+
+      
         ImGui::Begin("Gamer Config", &showMenu, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse);
         if (ImGui::BeginTabBar("MainTabs")) {
             if (ImGui::BeginTabItem("Settings")) {
@@ -340,21 +361,25 @@ HRESULT __stdcall hkEndScene(LPDIRECT3DDEVICE9 pDevice) {
             }
             ImGui::EndTabBar();
         }
+
         ImGui::Spacing();
         ImGui::Separator();
+
         float btnWidth = 140.0f;
         ImGui::SetCursorPosX((ImGui::GetWindowWidth() - btnWidth * 2 - ImGui::GetStyle().ItemSpacing.x) / 2);
         if (ImGui::Button("Close Menu", ImVec2(btnWidth, 35)))
             showMenu = false;
+
         ImGui::End();
     }
-
-
 
     ImGui::Render();
     ImGui_ImplDX9_RenderDrawData(ImGui::GetDrawData());
     return oEndScene(pDevice);
 }
+
+
+
 
 DWORD WINAPI InitHook(LPVOID) {
     while (!(window = FindWindowA("S4_Client", nullptr)))
@@ -399,6 +424,9 @@ void __fastcall patched_fun_005e4020(void* ecx, void* edx, uint32_t param_1) {
     }
 }
 
+
+
+
 void __fastcall patched_move_actor_by(void* ecx, void* edx, float param_1, float param_2, float param_3) {
     PatchOnlyNorRunFov();
     actor_ctx* actx = fetch_actor_ctx();
@@ -415,6 +443,7 @@ void __fastcall patched_move_actor_by(void* ecx, void* edx, float param_1, float
         if (actx->actor_state == 4 && was_flying) flying = true;
         was_flying = flying;
 
+       
         if (flying && param_2 > 0.0001f) {
             float orig_fixed_frametime = 16.666666f;
             float modifier = (orig_fixed_frametime / frametime);
@@ -425,7 +454,10 @@ void __fastcall patched_move_actor_by(void* ecx, void* edx, float param_1, float
             y = param_2 * modifier;
         }
 
+       //EXO JUMP
         if (actx->actor_state == 63 && param_2 > 0.0f) {
+           
+
             float frametime_ratio = 17.0f / frametime;
             if (frametime <= 13.0f) {
                 float est = frametime_ratio / (1.0f / 3.75f);
@@ -456,11 +488,16 @@ void __fastcall patched_move_actor_by(void* ecx, void* edx, float param_1, float
                 y = param_2 / est * frametime_ratio;
             }
             scythe_time += frametime;
+
+           //EXTRA MULTIPLIER FOR EXO
+       
+            y *= exo_jump_multiplier;
         }
         else {
             scythe_time = 0.0f;
         }
 
+        // Drop handling (state 45)
         if (actx->actor_state == 45 && set_drop_val == -50000.0f) {
             float drop_cutoff = (-750.0f) * (frametime / 16.666666f);
             if (param_2 < drop_cutoff) {
@@ -477,6 +514,7 @@ void __fastcall patched_move_actor_by(void* ecx, void* edx, float param_1, float
             first_ps_drop_frame = true;
         }
 
+        // NORMAL JUMP
         if (!flying && actx->actor_state != 63 && actx->actor_state != 45 && param_2 > 0.0001f) {
             y = param_2 * normal_jump_height_multiplier;
         }
@@ -487,6 +525,9 @@ void __fastcall patched_move_actor_by(void* ecx, void* edx, float param_1, float
 
     orig_move_actor_by(ecx, param_1, y, param_3);
 }
+
+
+
 
 void __fastcall patched_game_tick(void* ecx, void* edx) {
     PatchOnlyNorRunFov();
