@@ -25,19 +25,19 @@ static int field_of_view = 90;
 static int center_field_of_view = 100;
 static int sprint_field_of_view = 110;
 //The below settings are not working yet
-static int display_mode = 0;          
+static int display_mode = 0;
 static int resolution_width = 1920;
 static int resolution_height = 1080;
-static int aspect_ratio = 1;         
-static int graphic_quality = 2;       
+static int aspect_ratio = 1;
+static int graphic_quality = 2;
 //The Above settings are not working yet
 
 float normal_jump_height_multiplier = 0.953f;
 
 //Here you can edit the fly jump + jumping
-float flight_multiplier = 1.0f;   
+float flight_multiplier = 1.0f;
 //HERE YOU CAN CHANGE THE EXO JUMP!
-float exo_jump_multiplier = 2.0f;
+float exo_jump_multiplier = 0.653f;
 
 static float frametime = 16.666666f;
 static float speed_dampeners[9];
@@ -135,13 +135,13 @@ void PatchOnlyNorRunFov()
     float* norFov = reinterpret_cast<float*>(cam + 0x154);
     float* runFov = reinterpret_cast<float*>(cam + 0x158);
 
-  
+
     if (IsValidPtr(norFov, sizeof(float)) && IsValidPtr(runFov, sizeof(float)))
     {
         float curNor = *norFov;
         float curRun = *runFov;
 
-        
+
         if ((curNor > 50.0f && curNor < 150.0f) &&
             (curRun > 50.0f && curRun < 150.0f) &&
             (curNor != g_CustomFov || curRun != g_CustomFov))
@@ -161,7 +161,7 @@ float smoothedFPS = 0.0f;
 
 
 void UpdateJumpMultiplierByFPS() {
-  
+
     if (frametime > 0) {
         float fps = 1000.0f / frametime;
         smoothedFPS = (smoothedFPS * 0.9f) + (fps * 0.1f);
@@ -231,12 +231,12 @@ void RenderSettingsTab() {
     ImGui::Spacing();
 
     if (ImGui::SliderFloat("Field of View", &g_CustomFov, 50.0f, 120.0f, "%.0f°")) {
-      
+
         field_of_view = static_cast<int>(g_CustomFov);
         center_field_of_view = static_cast<int>(g_CustomFov);
         sprint_field_of_view = static_cast<int>(g_CustomFov) + 10;
 
-     
+
         auto mgr = *reinterpret_cast<uint8_t**>(0x01644AC8);
         if (mgr) {
             auto cam = *reinterpret_cast<uint8_t**>(mgr + 0x2C);
@@ -252,7 +252,7 @@ void RenderSettingsTab() {
 
     ImGui::SliderInt("Max Framerate", &max_framerate, 30, 1000, "%d FPS");
     //Here you can enable a slider to edit the exo jump
-    //  ImGui::SliderFloat("EXO Jump Multiplier", &exo_jump_multiplier, 0.1f, 5.0f);
+    ImGui::SliderFloat("EXO Jump Multiplier", &exo_jump_multiplier, 0.1f, 5.0f);
 }
 
 
@@ -337,7 +337,7 @@ HRESULT __stdcall hkEndScene(LPDIRECT3DDEVICE9 pDevice) {
     ImGui::NewFrame();
 
     if (showMenu) {
-       
+
         ImVec2 displaySize = ImGui::GetIO().DisplaySize;
         ImVec2 windowSize = ImVec2(600, 350);
         ImVec2 windowPos = ImVec2(
@@ -348,7 +348,7 @@ HRESULT __stdcall hkEndScene(LPDIRECT3DDEVICE9 pDevice) {
         ImGui::SetNextWindowPos(windowPos, ImGuiCond_Always);
         ImGui::SetNextWindowSize(windowSize, ImGuiCond_Always);
 
-      
+
         ImGui::Begin("Gamer Config", &showMenu, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse);
         if (ImGui::BeginTabBar("MainTabs")) {
             if (ImGui::BeginTabItem("Settings")) {
@@ -427,104 +427,99 @@ void __fastcall patched_fun_005e4020(void* ecx, void* edx, uint32_t param_1) {
 
 
 
-void __fastcall patched_move_actor_by(void* ecx, void* edx, float param_1, float param_2, float param_3) {
+
+// Fixes frame-dependent issues for:
+//  - Airborne motion smoothing
+//  - Exo Jump scaling
+//  - Plasma Sword stun-drop bug
+//  - Normal jump consistency
+// ============================================================================
+
+void __fastcall patched_move_actor_by(void* ecx, void* edx, float deltaX, float deltaY, float deltaZ) {
     PatchOnlyNorRunFov();
-    actor_ctx* actx = fetch_actor_ctx();
-    float y = param_2;
-    static float scythe_time = 0.0f;
-    static bool was_flying = false;
-    static bool first_ps_drop_frame = true;
-    void* ret_addr = _ReturnAddress();
+    actor_ctx* ctx = fetch_actor_ctx();
+    float adjustedY = deltaY;
 
-    if (ret_addr == (void*)0x00527467) {
-        bool flying = false;
-        if (actx->actor_state == 31) flying = true;
-        if ((actx->actor_state == 39 || actx->actor_state == 25) && (actx->actor_substate_2 & 0xffff) == 0x02ff) flying = true;
-        if (actx->actor_state == 4 && was_flying) flying = true;
-        was_flying = flying;
+    // Internal state tracking
+    static float exoAccumulatedTime = 0.0f;
+    static bool wasAirborne = false;
+    static bool plasmaDropFirstFrame = true;
 
-       
-        if (flying && param_2 > 0.0001f) {
-            float orig_fixed_frametime = 16.666666f;
-            float modifier = (orig_fixed_frametime / frametime);
-            if (frametime < orig_fixed_frametime) {
-                float frametime_diff_ratio = (orig_fixed_frametime - frametime) / orig_fixed_frametime;
-                modifier = modifier * (1.0f - 0.4f * frametime_diff_ratio);
+    void* caller = _ReturnAddress();
+
+    // Only patch when called from the expected site
+    if (caller == (void*)0x00527467) {
+        bool airborne = false;
+
+        // === Detect airborne/flying states ===
+        if (ctx->actor_state == 31) airborne = true;
+        if ((ctx->actor_state == 39 || ctx->actor_state == 25) &&
+            (ctx->actor_substate_2 & 0xffff) == 0x02ff) airborne = true;
+        if (ctx->actor_state == 4 && wasAirborne) airborne = true;
+        wasAirborne = airborne;
+
+        // === Airborne general smoothing ===
+        if (airborne && deltaY > 0.0001f) {
+            const float baseFrameTime = 16.666666f; // 60 FPS 
+            float scale = (baseFrameTime / frametime);
+
+            // Dampen when FPS is higher than 60
+            if (frametime < baseFrameTime) {
+                float frameRatio = (baseFrameTime - frametime) / baseFrameTime;
+                scale *= (1.0f - 0.4f * frameRatio);
             }
-            y = param_2 * modifier;
+            adjustedY = deltaY * scale;
         }
 
-       //EXO JUMP
-        if (actx->actor_state == 63 && param_2 > 0.0f) {
-           
+        // === Exo Jump handling (state 63) ===
+        if (ctx->actor_state == 63 && deltaY > 0.0f) {
+            float ratio = 17.0f / frametime;
 
-            float frametime_ratio = 17.0f / frametime;
-            if (frametime <= 13.0f) {
-                float est = frametime_ratio / (1.0f / 3.75f);
-                y = param_2 / est * frametime_ratio;
-            }
-            else if (frametime >= 33.0f) {
-                float est = frametime_ratio / 4.0f;
-                y = param_2 / est * frametime_ratio;
-            }
-            else if (frametime >= 28.0f) {
-                float est = frametime_ratio / 3.0f;
-                y = param_2 / est * frametime_ratio;
-            }
-            else if (frametime >= 25.0f) {
-                float est = frametime_ratio / 2.25f;
-                y = param_2 / est * frametime_ratio;
-            }
-            else if (frametime >= 22.0f) {
-                float est = frametime_ratio / 2.0f;
-                y = param_2 / est * frametime_ratio;
-            }
-            else if (frametime >= 19.0f) {
-                float est = frametime_ratio / 1.75f;
-                y = param_2 / est * frametime_ratio;
-            }
-            else if (frametime >= 18.0f) {
-                float est = frametime_ratio / 1.5f;
-                y = param_2 / est * frametime_ratio;
-            }
-            scythe_time += frametime;
+            if (frametime <= 13.0f)       adjustedY = deltaY / (ratio / (1.0f / 3.75f)) * ratio;
+            else if (frametime >= 33.0f)  adjustedY = deltaY / (ratio / 4.0f) * ratio;
+            else if (frametime >= 28.0f)  adjustedY = deltaY / (ratio / 3.0f) * ratio;
+            else if (frametime >= 25.0f)  adjustedY = deltaY / (ratio / 2.25f) * ratio;
+            else if (frametime >= 22.0f)  adjustedY = deltaY / (ratio / 2.0f) * ratio;
+            else if (frametime >= 19.0f)  adjustedY = deltaY / (ratio / 1.75f) * ratio;
+            else if (frametime >= 18.0f)  adjustedY = deltaY / (ratio / 1.5f) * ratio;
 
-           //EXTRA MULTIPLIER FOR EXO
-       
-            y *= exo_jump_multiplier;
+            exoAccumulatedTime += frametime;
+            adjustedY *= exo_jump_multiplier; // Exo jump configurable multiplier
         }
         else {
-            scythe_time = 0.0f;
+            exoAccumulatedTime = 0.0f;
         }
 
-        // Drop handling (state 45)
-        if (actx->actor_state == 45 && set_drop_val == -50000.0f) {
-            float drop_cutoff = (-750.0f) * (frametime / 16.666666f);
-            if (param_2 < drop_cutoff) {
-                if (first_ps_drop_frame) {
-                    y = -850.0f;
-                    first_ps_drop_frame = false;
+        // === Plasma Sword Stun Drop fix (state 45) ===
+        if (ctx->actor_state == 45) {
+            if (deltaY < -50.0f) { // Only when actually dropping fast
+                if (plasmaDropFirstFrame) {
+                    adjustedY = -850.0f;    // Force stable drop like 60fps
+                    plasmaDropFirstFrame = false;
                 }
                 else {
-                    y = 0.0f;
+                    adjustedY = 0.0f;       // Neutralize subsequent frames
                 }
             }
         }
         else {
-            first_ps_drop_frame = true;
+            plasmaDropFirstFrame = true; // Reset for next stun
         }
 
-        // NORMAL JUMP
-        if (!flying && actx->actor_state != 63 && actx->actor_state != 45 && param_2 > 0.0001f) {
-            y = param_2 * normal_jump_height_multiplier;
+        // === Normal Jump (all other cases) ===
+        if (!airborne && ctx->actor_state != 63 && ctx->actor_state != 45 && deltaY > 0.0001f) {
+            adjustedY = deltaY * normal_jump_height_multiplier;
         }
     }
     else {
-        scythe_time = 0.0f;
+        exoAccumulatedTime = 0.0f;
     }
 
-    orig_move_actor_by(ecx, param_1, y, param_3);
+    // Call the original movement logic
+    orig_move_actor_by(ecx, deltaX, adjustedY, deltaZ);
 }
+
+
 
 
 
@@ -683,8 +678,8 @@ DWORD WINAPI main_thread(LPVOID) {
 
     while (true)
     {
-        PatchOnlyNorRunFov(); 
-        Sleep(100);          
+        PatchOnlyNorRunFov();
+        Sleep(100);
     }
 
     return 0;
