@@ -1,4 +1,4 @@
-#define _CRT_SECURE_NO_WARNINGS
+﻿#define _CRT_SECURE_NO_WARNINGS
 
 #include <Windows.h>
 #include <d3d9.h>
@@ -37,7 +37,7 @@ float normal_jump_height_multiplier = 0.953f;
 //Here you can edit the fly jump + jumping
 float flight_multiplier = 1.0f;
 //HERE YOU CAN CHANGE THE EXO JUMP!
-float exo_jump_multiplier = 0.653f;
+float exo_jump_multiplier = 2.0f;
 
 static float frametime = 16.666666f;
 static float speed_dampeners[9];
@@ -100,7 +100,7 @@ static actor_ctx* fetch_actor_ctx() {
 
 
 //Fix FOV Start value
-static float g_CustomFov = 110.0f;
+static float g_CustomFov = 90.0f;
 
 bool IsValidPtr(void* ptr, size_t size = sizeof(void*))
 {
@@ -427,98 +427,101 @@ void __fastcall patched_fun_005e4020(void* ecx, void* edx, uint32_t param_1) {
 
 
 
-
-// Fixes frame-dependent issues for:
-//  - Airborne motion smoothing
-//  - Exo Jump scaling
-//  - Plasma Sword stun-drop bug
-//  - Normal jump consistency
-// ============================================================================
-
-void __fastcall patched_move_actor_by(void* ecx, void* edx, float deltaX, float deltaY, float deltaZ) {
+void __fastcall patched_move_actor_by(void* ecx, void* edx, float param_1, float param_2, float param_3) {
     PatchOnlyNorRunFov();
-    actor_ctx* ctx = fetch_actor_ctx();
-    float adjustedY = deltaY;
+    actor_ctx* actx = fetch_actor_ctx();
+    float y = param_2;
+    static float scythe_time = 0.0f;
+    static bool was_flying = false;
+    static bool first_ps_drop_frame = true;
+    void* ret_addr = _ReturnAddress();
 
-    // Internal state tracking
-    static float exoAccumulatedTime = 0.0f;
-    static bool wasAirborne = false;
-    static bool plasmaDropFirstFrame = true;
+    if (ret_addr == (void*)0x00527467) {
+        bool flying = false;
+        if (actx->actor_state == 31) flying = true;
+        if ((actx->actor_state == 39 || actx->actor_state == 25) && (actx->actor_substate_2 & 0xffff) == 0x02ff) flying = true;
+        if (actx->actor_state == 4 && was_flying) flying = true;
+        was_flying = flying;
 
-    void* caller = _ReturnAddress();
-
-    // Only patch when called from the expected site
-    if (caller == (void*)0x00527467) {
-        bool airborne = false;
-
-        // === Detect airborne/flying states ===
-        if (ctx->actor_state == 31) airborne = true;
-        if ((ctx->actor_state == 39 || ctx->actor_state == 25) &&
-            (ctx->actor_substate_2 & 0xffff) == 0x02ff) airborne = true;
-        if (ctx->actor_state == 4 && wasAirborne) airborne = true;
-        wasAirborne = airborne;
-
-        // === Airborne general smoothing ===
-        if (airborne && deltaY > 0.0001f) {
-            const float baseFrameTime = 16.666666f; // 60 FPS 
-            float scale = (baseFrameTime / frametime);
-
-            // Dampen when FPS is higher than 60
-            if (frametime < baseFrameTime) {
-                float frameRatio = (baseFrameTime - frametime) / baseFrameTime;
-                scale *= (1.0f - 0.4f * frameRatio);
+        if (flying && param_2 > 0.0001f) {
+            float orig_fixed_frametime = 16.666666f;
+            float modifier = (orig_fixed_frametime / frametime);
+            if (frametime < orig_fixed_frametime) {
+                float frametime_diff_ratio = (orig_fixed_frametime - frametime) / orig_fixed_frametime;
+                modifier = modifier * (1.0f - 0.4f * frametime_diff_ratio);
             }
-            adjustedY = deltaY * scale;
+            y = param_2 * modifier;
         }
 
-        // === Exo Jump handling (state 63) ===
-        if (ctx->actor_state == 63 && deltaY > 0.0f) {
-            float ratio = 17.0f / frametime;
+        // === EXO JUMP FIX ===
+        if (actx->actor_state == 63 && param_2 > 0.0f) {
+            float frametime_ratio = 17.0f / frametime;
+            if (frametime <= 13.0f) {
+                float est = frametime_ratio / (1.0f / 3.75f);
+                y = param_2 / est * frametime_ratio;
+            }
+            else if (frametime >= 33.0f) {
+                float est = frametime_ratio / 4.0f;
+                y = param_2 / est * frametime_ratio;
+            }
+            else if (frametime >= 28.0f) {
+                float est = frametime_ratio / 3.0f;
+                y = param_2 / est * frametime_ratio;
+            }
+            else if (frametime >= 25.0f) {
+                float est = frametime_ratio / 2.25f;
+                y = param_2 / est * frametime_ratio;
+            }
+            else if (frametime >= 22.0f) {
+                float est = frametime_ratio / 2.0f;
+                y = param_2 / est * frametime_ratio;
+            }
+            else if (frametime >= 19.0f) {
+                float est = frametime_ratio / 1.75f;
+                y = param_2 / est * frametime_ratio;
+            }
+            else if (frametime >= 18.0f) {
+                float est = frametime_ratio / 1.5f;
+                y = param_2 / est * frametime_ratio;
+            }
+            scythe_time += frametime;
 
-            if (frametime <= 13.0f)       adjustedY = deltaY / (ratio / (1.0f / 3.75f)) * ratio;
-            else if (frametime >= 33.0f)  adjustedY = deltaY / (ratio / 4.0f) * ratio;
-            else if (frametime >= 28.0f)  adjustedY = deltaY / (ratio / 3.0f) * ratio;
-            else if (frametime >= 25.0f)  adjustedY = deltaY / (ratio / 2.25f) * ratio;
-            else if (frametime >= 22.0f)  adjustedY = deltaY / (ratio / 2.0f) * ratio;
-            else if (frametime >= 19.0f)  adjustedY = deltaY / (ratio / 1.75f) * ratio;
-            else if (frametime >= 18.0f)  adjustedY = deltaY / (ratio / 1.5f) * ratio;
-
-            exoAccumulatedTime += frametime;
-            adjustedY *= exo_jump_multiplier; // Exo jump configurable multiplier
+            y *= exo_jump_multiplier; // Extra multiplier for Exo
         }
         else {
-            exoAccumulatedTime = 0.0f;
+            scythe_time = 0.0f;
         }
 
-        // === Plasma Sword Stun Drop fix (state 45) ===
-        if (ctx->actor_state == 45) {
-            if (deltaY < -50.0f) { // Only when actually dropping fast
-                if (plasmaDropFirstFrame) {
-                    adjustedY = -850.0f;    // Force stable drop like 60fps
-                    plasmaDropFirstFrame = false;
+        // === PLASMA STUN DROP FIX ===
+        if (actx->actor_state == 45) {
+            if (param_2 < -50.0f) { //We are already falling
+                if (first_ps_drop_frame) {
+                    // the first fps of falling, we force to be stable like 60 fps
+                    y = -850.0f;
+                    first_ps_drop_frame = false;
                 }
                 else {
-                    adjustedY = 0.0f;       // Neutralize subsequent frames
+                    // //to have an smooth fall
+                    y = 0.0f;
                 }
             }
         }
         else {
-            plasmaDropFirstFrame = true; // Reset for next stun
+            //reset for the next stun
+            first_ps_drop_frame = true;
         }
 
-        // === Normal Jump (all other cases) ===
-        if (!airborne && ctx->actor_state != 63 && ctx->actor_state != 45 && deltaY > 0.0001f) {
-            adjustedY = deltaY * normal_jump_height_multiplier;
+        // === NORMAL JUMP ===
+        if (!flying && actx->actor_state != 63 && actx->actor_state != 45 && param_2 > 0.0001f) {
+            y = param_2 * normal_jump_height_multiplier;
         }
     }
     else {
-        exoAccumulatedTime = 0.0f;
+        scythe_time = 0.0f;
     }
 
-    // Call the original movement logic
-    orig_move_actor_by(ecx, deltaX, adjustedY, deltaZ);
+    orig_move_actor_by(ecx, param_1, y, param_3);
 }
-
 
 
 
